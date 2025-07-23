@@ -1,11 +1,11 @@
 # General Purpose Experiment Designer & Analyzer
-### Manual for Users (v1.2.0)
+### Manual for v1.2.0
 
 This document is a guide to the **General Purpose Experiment Designer & Analyzer** tool and it is split into two parts:
 
-* **Part I: The User's Guide** will show how to use the tool, what the different options mean for your experiments, and how to interpret the results in a practical way.
+* **Part I: The User's Guide** will show how to use the tool, what the different options mean for your experiments, and how to interpret the results.
 
-* **Part II: The Technical Reference** is for understanding the inner workings of the program. This section contains the specific function names, mathematical equations, and detailed statistical formulas for the analysis.
+* **Part II: The Technical Reference** is for understanding the working of the program, if you want to modify some routines. This section contains the specific function names, mathematical equations, and detailed statistical formulas for the analysis.
 
 ---
 ---
@@ -14,26 +14,26 @@ This document is a guide to the **General Purpose Experiment Designer & Analyzer
 ## Getting Started and Interpreting Results
 
 
-### **1. The Workflow: From Setup to Solution**
+### **1. The Workflow**
 
 The tool is designed to follow the natural workflow of a scientific experiment.
 
 1.  **Step 1: Define Your Experiment**
     This is where you define the entire setup on a single screen.
-    * **Factors**: What can you control? Define your factor names (e.g., Temperature, Pressure) and the safe operating range for each (their minimum and maximum values).
-    * **Responses**: What will you measure? Decide how many responses you need (1 to 3) and give them descriptive names (e.g., Yield, Purity, Cost).
-    * **Design**: Choose an experimental "recipe" or design that best fits your goals.
+    * **Factors**: What can you control? Define your factor names (e.g., Temperature, Pressure) and the safe operating range for each (their minimum and maximum values). Up yo 6 factors can be controlled, be advides that the number of experiments are typically 2^k.
+    * **Responses**: What will you measure? Decide how many responses you need (1 to 3) and give them descriptive names (e.g., Yield, Purity, Cost). Optimization of each "response" (like yield, purity, etc) or a linear combination of them is possible.
+    * **Design**: Choose an experimental "type" or design that best fits your goals. Several most common experimental desings are included. For some other methods (e.g. Bayesian, ..) you need to modify the program or use other specialized packages.
 
 2.  **Step 2: Generate the Experimental Plan**
-    After setup, the tool will generate an experimental plan for you to follow. This isn't a random set of experiments; it's a scientifically chosen set of runs designed to give you the most information about your process with the least amount of work. For best results, the runs must be reproducible. If some parameters suggested by the program are not always achieved (e.g., the program suggests 1000°C but you measured at 980°C), you can edit the value in the table. It may not be optimal as a design point, but it will be correctly used in the calculations.
+    After setup, the tool will generate an experimental plan to follow. This isn't a random set of experiments; it's a scientifically chosen set of runs designed to give you the most information about your process with the least amount of work. For best results, the runs must be reproducible. If some parameters suggested by the program are not always achieved or achievable (e.g., the program suggests 1000°C but you measured at 980°C), you can edit the value in the experimental table. It may not be optimal as a design point, but it will be correctly used in the calculations.
 
 3.  **Step 3: Run Experiments and Enter Data**
     Perform the experiments as laid out in the plan. Afterwards, return to the tool and enter your measured results into the data table. If you just want to try the tool, you can use the **"Fill with Test Data"** button to see how it works.
 
 4.  **Step 4: Analyze, Optimize, and Understand**
-    The program analyzes your results and builds a mathematical model of your process as you fill the data table. It tells you how good that model is, which factors are most important, and predicts the best settings to achieve your goals. It also helps you find the perfect compromise when you are optimizing for multiple goals.
+    The program analyzes your results and builds a mathematical model of your process as you fill the data table. It tells you how good that model is, which factors are most important and can hopefully predict the best settings to achieve your goals. It also helps you find the best compromise when you are optimizing for multiple goals.
 
-5.  **Step 5: Visualize and Export Your Findings** 📄
+5.  **Step 5: Visualize and Export Data** 
     Finally, you can explore your results with 2D contour plots to "see" how the factors affect the outcome. When you're ready, you can export a PDF report of the entire analysis.
 
 ### **2. Setting Up Your Experiment**
@@ -45,34 +45,34 @@ A successful analysis begins with a well-defined experiment.
 In the first section of the tool, you define the parameters you can control and measure.
 
 * **Factors**:
-    * **Factor (Unit)**: Give your factor a descriptive name (e.g., "Temperature (°C)").
-    * **Min / Max**: Set the lowest and highest values you want to test for that factor. This defines your experimental "sandbox."
+    * **Factor (Unit)**: Give your factor descriptive names (e.g., "Temperature (°C)").
+    * **Min / Max**: Set the lowest and highest values you want to test for that factor. This defines your experimental range; the values can be in units of your choice.
     * **Varying vs. Fixed Factors**: If you set the Min and Max values to be the same, the tool will treat that factor as a fixed constant and will not include it in the optimization. For a factor to be studied, its Min and Max values must be different.
 * **Responses**:
-    * **Number of Responses**: Select how many different outcomes you plan to measure (from 1 to 3).
-    * **Response Name**: Give each response a clear name (e.g., "Yield (%)", "Purity", "Cost ($/kg)").
+    * **Number of Responses**: Select how many different outcomes you plan to measure (max 3).
+    * **Response Name**: Give each response a clear name (e.g., "Yield (%)", "Purity", ...").
 
 #### **2.2. Choosing the Right Experimental Design**
 
-The tool offers several "recipes," or designs, grouped by their purpose. Your choice depends on your goal.
+The tool offers several "methods" or designs, grouped by their purpose. Your choice depends on your goal.
 
 ##### **Screening Designs**
 *Use these when you have many factors and want to quickly identify which ones are most important.*
 
 * **Full Factorial Design**:
-    * **When to use it**: The most thorough screening design. Use it when you have a few factors (2-4) and want to understand all main effects and their interactions.
+    * The most thorough screening design. Use it when you have a few factors (2-4) and want to understand all main effects and their interactions.
 * **Fractional Factorial Design**:
-    * **When to use it**: The workhorse for efficient screening (3-7 factors). It uses a fraction of the runs of a Full Factorial, saving time and resources. It's excellent for identifying the most important factors, assuming complex interactions are less important.
+    * The workhorse for efficient screening (3-7 factors). It uses a fraction of the runs of a Full Factorial, saving time and resources. It's excellent for identifying the most important factors, assuming complex interactions are less important.
 * **Taguchi (L8) Design**:
-    * **When to use it**: An extremely efficient screening design for identifying the strongest main effects from up to 7 factors in only 8 experiments. Use this when you need a very fast and economical screen and can assume interactions are negligible.
+    * An efficient screening design for identifying the strongest main effects in only 8 experiments. Use this when you need a very fast and economical screen and can assume interactions are negligible.
 
 ##### **Optimization Designs**
 *Use these after screening, when you know the key factors and want to find their optimal settings.*
 
 * **Box-Behnken Design (BBD)**:
-    * **When to use it**: An efficient design for optimization (requires at least 3 factors). It's a good choice if you need to avoid running experiments at extreme conditions (e.g., where both temperature and pressure are at their absolute maximum).
+    * An efficient design for optimization (requires at least 3 factors). It's a good choice if you need to avoid running experiments at extreme conditions (e.g., where both temperature and pressure are at their absolute maximum).
 * **Central Composite Design (CCD)**:
-    * **When to use it**: The most powerful and popular design for optimization. It gives a complete picture of your process, including any curvature in the response, allowing you to reliably find the "peak" of your performance.
+    * The most popular design for optimization. It gives a complete picture of your process, including any curvature in the response, allowing you to reliably find the "peak" of your performance.
     * **CCD Type Option (Face-Centered vs. Rotatable)**: This option fine-tunes the design.
         * **Face-Centered**: Choose this if you absolutely must stay within your defined Min/Max limits for all experiments.
         * **Rotatable**: This is the default and usually the best choice. It gives you the most consistent prediction quality across your entire process space. *Note: This may suggest a few experimental runs that are slightly outside your initial Min/Max values.*
@@ -102,7 +102,7 @@ The model gives you a table of "coefficients" for each term. These numbers tell 
 #### **3.3. Finding the Best Settings: Optimization**
 
 * **Single Goal**: For each response, the tool will show you the predicted best settings to get the highest possible value.
-* **Competing Goals (The Importance Sliders)**: What if the best settings for Response 1 are bad for Response 2? The sliders let you define your priorities. By setting them (e.g., 70% importance for Response 1, 30% for Response 2), you ask the tool to find the single best **compromise** that honors your preferences.
+* **Competing Goals (The Importance Sliders)**: What if the best settings for Response 1 are not that good for Response 2? The sliders let you define your priorities. By setting them (e.g., 70% importance for Response 1, 30% for Response 2), you ask the tool to find the single best **compromise**.
 
 #### **3.4. What is the "Weighted Score Model"?**
 
@@ -117,7 +117,7 @@ The 2D plots are your maps to the optimum. *[Note: Plots are most meaningful for
 
 ### **5. Exporting Your Report**
 
-When you're finished, you can click the "Save Summary as PDF" button to get a report with all your data, models, and optimal values. The filename is timestamped for your records.
+When you're finished, you can click the "Save Summary as PDF" button to get a report with all your data, models, and optimal values. The filename is timestamped.
 
 ---
 ---
@@ -140,7 +140,7 @@ The designs are generated by specific functions within the tool's code.
 ### **7. Mathematics and Statistics**
 
 #### **7.1. Variable Coding and Normalization**
-Factor levels are normalized to a dimensionless [-1, 1] range.
+Factor levels are normalized to a dimensionless [-1, 1] range prior to fitting and converted back after that.
 
 * The `codeValue` function applies the transformation:
     $$\text{Coded Value} = \frac{2 \times (\text{Real Value} - \text{Min Value})}{(\text{Max Value} - \text{Min Value})} - 1$$
@@ -153,7 +153,7 @@ The `buildModel` function constructs and fits a model appropriate for the design
     $$y = \beta_0 + \sum_{i=1}^{k} \beta_i X_i + \sum_{i=1}^{k} \beta_{ii} X_i^2 + \sum_{i<j}^{k} \beta_{ij} X_i X_j + \epsilon$$
 
 #### **7.3. Parameter Estimation via Least Squares**
-The coefficients ($\beta$) are determined using Ordinary Least Squares (OLS) via the matrix equation:
+The coefficients ($\beta$) are determined by using Least Squares via the matrix equation:
 $$\mathbf{b} = (\mathbf{X}^T \mathbf{X})^{-1} \mathbf{X}^T \mathbf{y}$$
 
 ### **8. Detailed Statistical Parameter Definitions**
