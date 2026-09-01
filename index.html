@@ -133,7 +133,7 @@
                 <div id="statistics-container" class="hidden space-y-6"></div>
 
                 <div id="plots-card" class="card hidden">
-                    <h2 class="text-2xl font-semibold text-slate-700 mb-4">2D Contour Plots</h2>
+                    <h2 id="plots-card-title" class="text-2xl font-semibold text-slate-700 mb-4">2D Contour Plots</h2>
                     <p id="contour-plots-placeholder" class="text-sm text-slate-600 mb-4">Enter enough results for your chosen design to generate models and plots.</p>
                     <div id="contour-plots-container" class="space-y-12"></div>
                 </div>
@@ -185,6 +185,7 @@
         const plotsCard = document.getElementById('plots-card');
         const statisticsContainer = document.getElementById('statistics-container');
         const contourPlotsContainer = document.getElementById('contour-plots-container');
+        const plotsCardTitle = document.getElementById('plots-card-title');
         const contourPlotsPlaceholder = document.getElementById('contour-plots-placeholder');
         const savePdfCard = document.getElementById('save-pdf-card');
         const savePdfBtn = document.getElementById('save-pdf-btn');
@@ -294,17 +295,40 @@
         const ffResolution = (k, p, gens) => Math.min(...ffDefiningWords(k, p, gens).map(popCount));
         const ffWordString = (m, k) => [...FF_LETTERS.slice(0, k)].filter((_, i) => (m >> i) & 1).join('');
 
+        // Which effects are confounded with which, read straight off the defining relation.
+        function ffAliasSummary(k, design) {
+            const words = ffDefiningWords(k, design.p, design.gens);
+            const res = Math.min(...words.map(popCount));
+            const name = m => ffWordString(m, k);
+            if (res >= 5) return 'All main effects and two-factor interactions are free of each other.';
+            if (res === 3) {
+                const parts = [];
+                for (let i = 0; i < k; i++) {
+                    const al = words.map(w => (1 << i) ^ w).filter(m => popCount(m) === 2).map(name);
+                    if (al.length) parts.push(`${FF_LETTERS[i]} = ${al.join(' + ')}`);
+                }
+                return 'Main effects are aliased with two-factor interactions: ' + parts.join('; ') + '. An apparent main effect may in fact be any of the interactions it is aliased with.';
+            }
+            const seen = new Set(), groups = [];
+            for (let i = 0; i < k; i++) for (let j = i + 1; j < k; j++) {
+                const pair = (1 << i) | (1 << j);
+                if (seen.has(pair)) continue;
+                const group = [pair, ...words.map(w => pair ^ w).filter(x => popCount(x) === 2)];
+                group.forEach(x => seen.add(x));
+                if (group.length > 1) groups.push(group.map(name).join(' = '));
+            }
+            return groups.length
+                ? 'Main effects are clear of two-factor interactions. Aliased interaction groups: ' + groups.join('; ') + '.'
+                : 'Main effects are clear of two-factor interactions.';
+        }
+
         function ffDescribe(k, design, factorNames) {
             const p = design.p;
             const words = ffDefiningWords(k, p, design.gens).map(m => ffWordString(m, k)).sort((a, b) => a.length - b.length || a.localeCompare(b));
             const res = ffResolution(k, p, design.gens);
             const base = k - p;
             const gensTxt = design.gens.map((g, i) => `${FF_LETTERS[base + i]} = ${g.map(b => FF_LETTERS[b]).join('')}`).join(', ');
-            const meaning = res >= 5
-                ? 'Main effects and two-factor interactions are all clear of each other.'
-                : (res === 4
-                    ? 'Main effects are clear of two-factor interactions, but two-factor interactions are aliased with each other.'
-                    : 'Main effects are aliased with two-factor interactions. Use for screening only, assuming interactions are negligible.');
+            const meaning = ffAliasSummary(k, design);
             const shown = words.slice(0, 8).join(' = ');
             const key = factorNames ? factorNames.map((nm, i) => `${FF_LETTERS[i]}=${nm}`).join(', ') : '';
             return {
@@ -728,7 +752,7 @@
                 }
             });
 
-            const combinedStatsModel = buildModel(experimentData, definedFactors, 'weightedResponse', currentDesignType);
+            const combinedStatsModel = responses.length > 1 ? buildModel(experimentData, definedFactors, 'weightedResponse', currentDesignType) : null;
             if (combinedStatsModel && combinedStatsModel.outlierRunIds) {
                 allOutlierIds.push(...combinedStatsModel.outlierRunIds);
             }
@@ -750,10 +774,21 @@
             });
 
             buildCombinedOptimumDisplay(combinedOptimum, predictedCombinedDisplay, models);
-            buildStatisticsDisplay(combinedStatsModel, 'Weighted Score Model');
+            responses.forEach(r => buildStatisticsDisplay(models[r.id], `${r.name} Model`));
+            if (responses.length > 1) buildStatisticsDisplay(combinedStatsModel, 'Weighted Score Model', true);
 
-            if (Object.values(models).some(m => m !== null) && definedFactors.length >= 2) {
+            const isScreening = ['taguchi', 'fractional-factorial'].includes(currentDesignType);
+            const haveModel = Object.values(models).some(m => m !== null);
+            if (haveModel && isScreening) {
+                // A main-effects-only model has no curvature and no interactions, so its contour
+                // plots are just tilted planes. The effect estimates are the useful picture.
                 plotsCard.classList.remove('hidden');
+                plotsCardTitle.textContent = 'Effect Estimates';
+                contourPlotsPlaceholder.style.display = 'none';
+                buildEffectsPlots(models);
+            } else if (haveModel && definedFactors.length >= 2) {
+                plotsCard.classList.remove('hidden');
+                plotsCardTitle.textContent = '2D Contour Plots';
                 contourPlotsPlaceholder.style.display = 'none';
                 buildContourPlots(definedFactors, models, optima);
             } else if (definedFactors.length < 2) {
@@ -836,15 +871,25 @@
              return { settings: bestRealSettings, codedSettings: bestCoded.settings, predictions: predictionsAtOpt };
          }
 
-        function buildStatisticsDisplay(model, responseName) {
+        function buildStatisticsDisplay(model, responseName, isNormalized) {
             if (!model) return;
             const card = document.createElement('div');
             card.className = 'card';
-            
+            const df = model.stats.dfError;
+
             let warningsHtml = '';
-            if (model.stats['Adeq. Precision'] < 4) {
-                warningsHtml += `<p class="text-xs text-amber-700 bg-amber-50 p-2 rounded-md mb-4"><strong>Model Warning:</strong> The Adequate Precision is less than 4. This model should not be used for navigating the design space.</p>`;
+            if (model.stats.saturated) {
+                warningsHtml += `<p class="text-xs text-red-700 bg-red-50 p-2 rounded-md mb-2"><strong>Saturated design:</strong> the model uses every run, leaving 0 degrees of freedom for error. No residual variance can be estimated, so standard errors, confidence intervals, R-Squared and PRESS are not available. Judge which effects are real from the effect estimates plot (Lenth limits) below.</p>`;
+            } else if (df <= 2) {
+                warningsHtml += `<p class="text-xs text-amber-700 bg-amber-50 p-2 rounded-md mb-2"><strong>Model Warning:</strong> only ${df} residual degree${df === 1 ? '' : 's'} of freedom. Significance of individual effects cannot be assessed reliably; the confidence intervals below are correspondingly wide. Add replicates or center points, or use a larger fraction, before drawing conclusions.</p>`;
             }
+            if (model.stats['Adeq. Precision'] !== null && model.stats['Adeq. Precision'] < 4) {
+                warningsHtml += `<p class="text-xs text-amber-700 bg-amber-50 p-2 rounded-md mb-2"><strong>Model Warning:</strong> the Adequate Precision is less than 4. This model should not be used for navigating the design space.</p>`;
+            }
+            if (isNormalized) {
+                warningsHtml += `<p class="text-xs text-slate-600 bg-slate-50 p-2 rounded-md mb-2">Coefficients below are in normalized score units (0 to 1), not in the units of any single response.</p>`;
+            }
+            if (warningsHtml) warningsHtml += '<div class="mb-2"></div>';
 
             const statsOrder = ['Std. Dev.', 'Mean', 'C.V. %', 'PRESS', 'R-Squared', 'Adj R-Squared', 'Pred R-Squared', 'Adeq. Precision'];
             const fitStatsHtml = statsOrder.map(key => `<tr><td class="py-1 pr-4 font-medium text-slate-600">${key}</td><td class="py-1 text-right font-value">${model.stats[key]?.toFixed(4) ?? '-'}</td></tr>`).join('');
@@ -860,7 +905,7 @@
                             <tbody>${Object.entries(model.coeffs).map(([term, stats])=>`<tr><td class="border-t px-2 py-1">${term.replace(/\*/g, ' * ')}</td><td class="border-t px-2 py-1 text-right font-value">${stats.value.toFixed(4)}</td><td class="border-t px-2 py-1 text-right font-value">${stats.stdError.toFixed(4)}</td><td class="border-t px-2 py-1 text-right font-value">${stats.ciLower.toFixed(4)}</td><td class="border-t px-2 py-1 text-right font-value">${stats.ciUpper.toFixed(4)}</td></tr>`).join('')}</tbody>
                         </table>
                     </div>
-                    <p class="text-xs text-slate-500 mt-2">* 95% confidence intervals use t = ${model.stats.tCritical.toFixed(3)} with ${model.stats.dfError} residual degrees of freedom.</p>
+                    <p class="text-xs text-slate-500 mt-2">${model.stats.saturated ? '* No error degrees of freedom: standard errors and confidence intervals are not estimable.' : `* 95% confidence intervals use t = ${model.stats.tCritical.toFixed(3)} with ${df} residual degrees of freedom.`}</p>
                 </div>
                 <div class="border-t pt-4 mt-4">
                     <table class="w-full text-sm fit-statistics-table">
@@ -900,13 +945,104 @@
             });
         }
 
+        // --- Effect estimates for screening designs -----------------------------------------
+        // Lenth's pseudo standard error: a robust scale estimate built from the effects
+        // themselves, so significance can be judged with no degrees of freedom to spare.
+        function lenthLimits(effects) {
+            const m = effects.length;
+            if (m < 3) return null;
+            const median = arr => { const a = [...arr].sort((x, y) => x - y), n = a.length; return n % 2 ? a[(n - 1) / 2] : 0.5 * (a[n / 2 - 1] + a[n / 2]); };
+            const abs = effects.map(Math.abs);
+            const s0 = 1.5 * median(abs);
+            const kept = abs.filter(v => v < 2.5 * s0);
+            const pse = 1.5 * median(kept.length ? kept : abs);
+            if (!(pse > 0)) return null;
+            const d = m / 3;
+            const gamma = (1 + Math.pow(0.95, 1 / m)) / 2;
+            return { pse, me: tInv(0.975, d) * pse, sme: tInv(gamma, d) * pse };
+        }
+
+        function buildEffectsPlots(models) {
+            contourPlotsContainer.innerHTML = '';
+            const wrapper = document.createElement('div');
+            wrapper.className = 'space-y-4';
+            const title = document.createElement('h3');
+            title.className = 'text-xl font-semibold text-center text-slate-700';
+            title.textContent = 'Absolute effect estimates with Lenth limits';
+            wrapper.appendChild(title);
+            const caption = document.createElement('p');
+            caption.className = 'text-xs text-slate-500 text-center';
+            caption.textContent = 'Effects are in coded units (change in response from the low to the high level). Bars past ME are individually significant at 95%; bars past SME are significant after correcting for testing every effect at once. Blue increases the response, red decreases it.';
+            wrapper.appendChild(caption);
+            const grid = document.createElement('div');
+            grid.className = 'grid grid-cols-1 md:grid-cols-2 gap-8';
+            responses.forEach(response => {
+                const model = models[response.id];
+                if (!model) return;
+                const plotDiv = document.createElement('div');
+                const canvasId = `effects-${response.id}`;
+                plotDiv.innerHTML = `<h4 class="font-medium text-center text-slate-600 mb-2">${response.name}</h4><canvas id="${canvasId}" class="w-full h-auto"></canvas>`;
+                grid.appendChild(plotDiv);
+                setTimeout(() => drawEffectsPlot(canvasId, model), 0);
+            });
+            if (grid.children.length > 0) wrapper.appendChild(grid);
+            contourPlotsContainer.appendChild(wrapper);
+        }
+
+        function drawEffectsPlot(canvasId, model) {
+            const canvas = document.getElementById(canvasId);
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const terms = Object.entries(model.coeffs)
+                .filter(([t]) => t !== 'Intercept')
+                .map(([t, st]) => ({ term: t.replace(/\*/g, '\u00b7'), effect: 2 * st.value }))
+                .sort((a, b) => Math.abs(b.effect) - Math.abs(a.effect));
+            if (terms.length === 0) return;
+            const limits = lenthLimits(terms.map(t => t.effect));
+            const rowH = 24, margin = { top: 34, right: 26, bottom: 48, left: 104 };
+            const width = 560, height = margin.top + margin.bottom + terms.length * rowH;
+            canvas.width = width; canvas.height = height;
+            const plotWidth = width - margin.left - margin.right;
+            const plotBottom = height - margin.bottom;
+            ctx.fillStyle = '#f8fafc'; ctx.fillRect(0, 0, width, height);
+            const maxAbs = Math.max(...terms.map(t => Math.abs(t.effect)), limits ? limits.sme : 0) * 1.08 || 1;
+            const xs = v => margin.left + (v / maxAbs) * plotWidth;
+            ctx.font = '11px Inter'; ctx.textBaseline = 'middle';
+            terms.forEach((t, i) => {
+                const y = margin.top + i * rowH + rowH / 2;
+                ctx.fillStyle = t.effect >= 0 ? '#4f46e5' : '#e11d48';
+                ctx.fillRect(margin.left, y - rowH * 0.32, Math.max(1, xs(Math.abs(t.effect)) - margin.left), rowH * 0.64);
+                ctx.fillStyle = '#334155'; ctx.textAlign = 'right';
+                const label = t.term.length > 16 ? t.term.slice(0, 15) + '\u2026' : t.term;
+                ctx.fillText(label, margin.left - 8, y);
+            });
+            ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(margin.left, margin.top - 4); ctx.lineTo(margin.left, plotBottom); ctx.lineTo(width - margin.right, plotBottom); ctx.stroke();
+            ctx.fillStyle = '#333'; ctx.textAlign = 'center';
+            for (let i = 0; i <= 4; i++) {
+                const v = maxAbs * i / 4, x = xs(v);
+                ctx.beginPath(); ctx.moveTo(x, plotBottom); ctx.lineTo(x, plotBottom + 5); ctx.stroke();
+                ctx.fillText(compactNumber(v), x, plotBottom + 15);
+            }
+            ctx.fillText('| effect |', margin.left + plotWidth / 2, plotBottom + 33);
+            if (limits) {
+                [['ME', limits.me, '#0f766e'], ['SME', limits.sme, '#b45309']].forEach(([lab, v, col]) => {
+                    if (!isFinite(v) || v > maxAbs) return;
+                    const x = xs(v);
+                    ctx.save(); ctx.setLineDash([4, 3]); ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+                    ctx.beginPath(); ctx.moveTo(x, margin.top - 4); ctx.lineTo(x, plotBottom); ctx.stroke(); ctx.restore();
+                    ctx.fillStyle = col; ctx.textAlign = 'center'; ctx.fillText(lab, x, margin.top - 14);
+                });
+            }
+        }
+
         function draw2DContourPlot(canvasId, model, factorX, factorY, optimumResult) {
             const canvas = document.getElementById(canvasId);
             if (!canvas) return;
             const ctx = canvas.getContext('2d');
             const width = 400, height = 350;
             canvas.width = width; canvas.height = height;
-            const margin = { top: 30, right: 70, bottom: 50, left: 60 };
+            const margin = { top: 30, right: 84, bottom: 50, left: 68 };
             const plotWidth = width - margin.left - margin.right;
             const plotHeight = height - margin.top - margin.bottom;
             ctx.clearRect(0, 0, width, height);
@@ -946,12 +1082,14 @@
             }
             ctx.putImageData(imageData, margin.left, margin.top);
             ctx.strokeStyle = '#333'; ctx.lineWidth = 1; ctx.font = '11px Inter'; ctx.fillStyle = '#333'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            const fmtX = axisTickFormatter(factorX.min, factorX.max);
+            const fmtY = axisTickFormatter(factorY.min, factorY.max);
             ctx.beginPath(); ctx.moveTo(margin.left, margin.top + plotHeight); ctx.lineTo(margin.left + plotWidth, margin.top + plotHeight); ctx.stroke();
             for (let i = 0; i < 5; i++) {
                 const val = factorX.min + (i / 4) * (factorX.max - factorX.min);
                 const x = margin.left + (i / 4) * plotWidth;
                 ctx.beginPath(); ctx.moveTo(x, margin.top + plotHeight); ctx.lineTo(x, margin.top + plotHeight + 5); ctx.stroke();
-                ctx.fillText(val.toFixed(1), x, margin.top + plotHeight + 15);
+                ctx.fillText(fmtX(val), x, margin.top + plotHeight + 15);
             }
             ctx.fillText(factorX.name, margin.left + plotWidth / 2, margin.top + plotHeight + 35);
             ctx.beginPath(); ctx.moveTo(margin.left, margin.top); ctx.lineTo(margin.left, margin.top + plotHeight); ctx.stroke();
@@ -959,10 +1097,10 @@
                 const val = factorY.min + (i / 4) * (factorY.max - factorY.min);
                 const y = margin.top + plotHeight - (i / 4) * plotHeight;
                 ctx.beginPath(); ctx.moveTo(margin.left, y); ctx.lineTo(margin.left - 5, y); ctx.stroke();
-                ctx.textAlign = 'right'; ctx.fillText(val.toFixed(1), margin.left - 10, y);
+                ctx.textAlign = 'right'; ctx.fillText(fmtY(val), margin.left - 10, y);
             }
-            ctx.save(); ctx.translate(margin.left - 45, margin.top + plotHeight / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center'; ctx.fillText(factorY.name, 0, 0); ctx.restore();
-            const legendWidth = 15, legendX = width - margin.right + 15;
+            ctx.save(); ctx.translate(margin.left - 52, margin.top + plotHeight / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = 'center'; ctx.fillText(factorY.name, 0, 0); ctx.restore();
+            const legendWidth = 14, legendX = width - margin.right + 10;
             const legendGradient = ctx.createLinearGradient(0, margin.top + plotHeight, 0, margin.top);
             for (let i = 0; i <= 1; i += 0.1) {
                 const color = new THREE.Color();
@@ -971,7 +1109,8 @@
             }
             ctx.fillStyle = legendGradient; ctx.fillRect(legendX, margin.top, legendWidth, plotHeight); ctx.strokeStyle = '#333'; ctx.strokeRect(legendX, margin.top, legendWidth, plotHeight);
             ctx.fillStyle = '#333'; ctx.textAlign = 'left'; ctx.font = '10px Inter';
-            ctx.fillText(maxZ.toFixed(1), legendX + legendWidth + 5, margin.top); ctx.fillText(minZ.toFixed(1), legendX + legendWidth + 5, margin.top + plotHeight);
+            ctx.fillText(compactNumber(maxZ), legendX + legendWidth + 5, margin.top); ctx.fillText(compactNumber(minZ), legendX + legendWidth + 5, margin.top + plotHeight);
+            ctx.fillText(compactNumber((maxZ + minZ) / 2), legendX + legendWidth + 5, margin.top + plotHeight / 2);
             const optimumSettings = optimumResult.optimum.settings;
             if (optimumSettings[factorX.name] !== undefined && optimumSettings[factorY.name] !== undefined) {
                 const optX = margin.left + ((optimumSettings[factorX.name] - factorX.min) / (factorX.max - factorX.min)) * plotWidth;
@@ -992,10 +1131,30 @@
         const T_CACHE={};
         function tInv(p,v){if(!(v>0)||!isFinite(v))return 1.959963985;const key=p+'|'+v;if(T_CACHE[key]!==undefined)return T_CACHE[key];let lo=0,hi=1e4;for(let i=0;i<200;i++){const mid=0.5*(lo+hi);if(tCDF(mid,v)<p)lo=mid;else hi=mid}const r=0.5*(lo+hi);T_CACHE[key]=r;return r}
 
+        // Compact axis / legend labels: 3.48M rather than an overflowing 3481234.
+        const compactNumber = v => {
+            if (!isFinite(v)) return '-';
+            const a = Math.abs(v);
+            if (a >= 1e9) return (v / 1e9).toFixed(2) + 'G';
+            if (a >= 1e6) return (v / 1e6).toFixed(2) + 'M';
+            if (a >= 1e4) return (v / 1e3).toFixed(1) + 'k';
+            if (a === 0) return '0';
+            if (a < 0.001) return v.toExponential(1);
+            return v.toFixed(a < 1 ? 3 : (a < 100 ? 2 : 0));
+        };
+        // Enough decimals that neighbouring ticks are actually distinguishable.
+        function axisTickFormatter(min, max) {
+            const span = Math.abs(max - min);
+            if (!(span > 0)) return v => v.toFixed(2);
+            const step = span / 4;
+            const d = Math.min(6, Math.max(0, -Math.floor(Math.log10(step)) + 1));
+            return v => v.toFixed(d);
+        }
+
         const codeValue=(realValue,min,max)=>(max===min)?0:(2*(realValue-min)/(max-min)-1);
         const uncodeValue=(codedValue,min,max)=>min+(codedValue+1)*(max-min)/2;
 
-        function buildModel(dataPoints,factors,responseId,designType){const validData=dataPoints.filter(d=>d[responseId]!==null&&isFinite(d[responseId])&&factors.every(f=>d.settings[f.name]!==undefined));const k=factors.length;let termHeaders=['Intercept'];factors.forEach(f=>termHeaders.push(f.name));const isScreening=['taguchi','fractional-factorial'].includes(designType);if(!isScreening){if(designType!=='factorial'){for(let i=0;i<k;i++){termHeaders.push(`${factors[i].name}*${factors[i].name}`);for(let j=i+1;j<k;j++){termHeaders.push(`${factors[i].name}*${factors[j].name}`)}}}else{for(let i=0;i<k;i++)for(let j=i+1;j<k;j++)termHeaders.push(`${factors[i].name}*${factors[j].name}`)}}if(validData.length<termHeaders.length)return null;const X=validData.map(p=>{const codedSettings={};factors.forEach(f=>codedSettings[f.name]=codeValue(p.settings[f.name],f.min,f.max));const row=[1];factors.forEach(f=>row.push(codedSettings[f.name]));if(!isScreening){if(designType!=='factorial'){for(let i=0;i<k;i++){row.push(codedSettings[factors[i].name]**2);for(let j=i+1;j<k;j++){row.push(codedSettings[factors[i].name]*codedSettings[factors[j].name])}}}else{for(let i=0;i<k;i++)for(let j=i+1;j<k;j++)row.push(codedSettings[factors[i].name]*codedSettings[factors[j].name])}}return row});let yObserved=validData.map(p=>p[responseId]);const Xt=matrix.transpose(X),XtX=matrix.multiply(Xt,X),XtX_inv=matrix.invert(XtX);if(!XtX_inv){customAlert(`Multicollinearity Detected for response "${responses.find(r=>r.id===responseId)?.name || responseId}": The experimental design is ill-conditioned and a model cannot be built. This often happens when factor values are not varied independently. Please check the factor settings in the table.`);return null}const b=matrix.multiply(XtX_inv,matrix.multiply(Xt,yObserved.map(v=>[v]))).map(c=>c[0]);const yPredicted=matrix.multiply(X,b.map(c=>[c])).map(v=>v[0]);const yMean=yObserved.reduce((a,b)=>a+b,0)/yObserved.length;const residuals=yObserved.map((y,i)=>y-yPredicted[i]);const ssError=residuals.reduce((sum,r)=>sum+r*r,0);const ssTotal=yObserved.reduce((sum,y)=>sum+(y-yMean)**2,0);const n=validData.length,p_terms=b.length;if(n-p_terms<=0)return null;const msError=ssError/(n-p_terms);const hatDiag=X.map(x_i=>matrix.dot(matrix.multiply([x_i],XtX_inv)[0],x_i));const press=residuals.reduce((sum,r,i)=>(1-hatDiag[i]>1e-9)?sum+Math.pow(r/(1-hatDiag[i]),2):sum,0);const predR2=ssTotal>0?1-(press/ssTotal):1;const stdDev=Math.sqrt(msError);const dfError=n-p_terms;const dfOut=dfError-1;const outlierCutoff=dfOut>0?Math.max(3,tInv(1-0.025/n,dfOut)):Infinity;const rStudent=residuals.map((r,i)=>{const h=hatDiag[i];if(dfOut<=0||1-h<=1e-9)return 0;const s2i=((dfError*msError)-(r*r/(1-h)))/dfOut;return s2i>1e-12?r/Math.sqrt(s2i*(1-h)):0});const outlierRunIds=validData.filter((_,i)=>Math.abs(rStudent[i])>outlierCutoff).map(p=>p.id);const cv=yMean!==0?Math.abs((stdDev/yMean)*100):0;const yPredRange=Math.max(...yPredicted)-Math.min(...yPredicted);const adeqPrec=msError>0?yPredRange/Math.sqrt(p_terms*msError/n):Infinity;const r2=ssTotal>0?1-(ssError/ssTotal):1;const adjR2=n-p_terms>0?1-((1-r2)*(n-1))/(n-p_terms):r2;const t_critical=tInv(0.975,dfError);const coeffsWithStats={};termHeaders.forEach((key,i)=>{const c_ii=XtX_inv[i][i];const stdError=Math.sqrt(msError*c_ii);const marginOfError=t_critical*stdError;coeffsWithStats[key]={value:b[i],stdError,ciLower:b[i]-marginOfError,ciUpper:b[i]+marginOfError}});return{coeffs:coeffsWithStats,stats:{'Std. Dev.':stdDev,Mean:yMean,'C.V. %':cv,PRESS:press,'R-Squared':r2,'Adj R-Squared':adjR2,'Pred R-Squared':predR2,'Adeq. Precision':adeqPrec,msError,dfError,tCritical:t_critical},matrixInfo:{XtX_inv,termHeaders},outlierRunIds}}
+        function buildModel(dataPoints,factors,responseId,designType){const validData=dataPoints.filter(d=>d[responseId]!==null&&isFinite(d[responseId])&&factors.every(f=>d.settings[f.name]!==undefined));const k=factors.length;let termHeaders=['Intercept'];factors.forEach(f=>termHeaders.push(f.name));const isScreening=['taguchi','fractional-factorial'].includes(designType);if(!isScreening){if(designType!=='factorial'){for(let i=0;i<k;i++){termHeaders.push(`${factors[i].name}*${factors[i].name}`);for(let j=i+1;j<k;j++){termHeaders.push(`${factors[i].name}*${factors[j].name}`)}}}else{for(let i=0;i<k;i++)for(let j=i+1;j<k;j++)termHeaders.push(`${factors[i].name}*${factors[j].name}`)}}if(validData.length<termHeaders.length)return null;const X=validData.map(p=>{const codedSettings={};factors.forEach(f=>codedSettings[f.name]=codeValue(p.settings[f.name],f.min,f.max));const row=[1];factors.forEach(f=>row.push(codedSettings[f.name]));if(!isScreening){if(designType!=='factorial'){for(let i=0;i<k;i++){row.push(codedSettings[factors[i].name]**2);for(let j=i+1;j<k;j++){row.push(codedSettings[factors[i].name]*codedSettings[factors[j].name])}}}else{for(let i=0;i<k;i++)for(let j=i+1;j<k;j++)row.push(codedSettings[factors[i].name]*codedSettings[factors[j].name])}}return row});let yObserved=validData.map(p=>p[responseId]);const Xt=matrix.transpose(X),XtX=matrix.multiply(Xt,X),XtX_inv=matrix.invert(XtX);if(!XtX_inv){customAlert(`Multicollinearity Detected for response "${responses.find(r=>r.id===responseId)?.name || responseId}": The experimental design is ill-conditioned and a model cannot be built. This often happens when factor values are not varied independently. Please check the factor settings in the table.`);return null}const b=matrix.multiply(XtX_inv,matrix.multiply(Xt,yObserved.map(v=>[v]))).map(c=>c[0]);const yPredicted=matrix.multiply(X,b.map(c=>[c])).map(v=>v[0]);const yMean=yObserved.reduce((a,b)=>a+b,0)/yObserved.length;const residuals=yObserved.map((y,i)=>y-yPredicted[i]);const ssError=residuals.reduce((sum,r)=>sum+r*r,0);const ssTotal=yObserved.reduce((sum,y)=>sum+(y-yMean)**2,0);const n=validData.length,p_terms=b.length;if(n-p_terms<0)return null;const saturated=(n-p_terms)===0;const msError=saturated?0:ssError/(n-p_terms);const hatDiag=X.map(x_i=>matrix.dot(matrix.multiply([x_i],XtX_inv)[0],x_i));const press=saturated?null:residuals.reduce((sum,r,i)=>(1-hatDiag[i]>1e-9)?sum+Math.pow(r/(1-hatDiag[i]),2):sum,0);const predR2=saturated?null:(ssTotal>0?1-(press/ssTotal):1);const stdDev=Math.sqrt(msError);const dfError=n-p_terms;const dfOut=dfError-1;const outlierCutoff=dfOut>0?Math.max(3,tInv(1-0.025/n,dfOut)):Infinity;const rStudent=residuals.map((r,i)=>{const h=hatDiag[i];if(dfOut<=0||1-h<=1e-9)return 0;const s2i=((dfError*msError)-(r*r/(1-h)))/dfOut;return s2i>1e-12?r/Math.sqrt(s2i*(1-h)):0});const outlierRunIds=validData.filter((_,i)=>Math.abs(rStudent[i])>outlierCutoff).map(p=>p.id);const cv=saturated?null:(yMean!==0?Math.abs((stdDev/yMean)*100):0);const yPredRange=Math.max(...yPredicted)-Math.min(...yPredicted);const adeqPrec=saturated?null:(msError>0?yPredRange/Math.sqrt(p_terms*msError/n):Infinity);const r2=ssTotal>0?1-(ssError/ssTotal):1;const adjR2=n-p_terms>0?1-((1-r2)*(n-1))/(n-p_terms):null;const t_critical=saturated?null:tInv(0.975,dfError);const coeffsWithStats={};termHeaders.forEach((key,i)=>{const c_ii=XtX_inv[i][i];const stdError=Math.sqrt(msError*c_ii);const marginOfError=saturated?0:t_critical*stdError;coeffsWithStats[key]={value:b[i],stdError,ciLower:b[i]-marginOfError,ciUpper:b[i]+marginOfError}});return{coeffs:coeffsWithStats,stats:{'Std. Dev.':stdDev,Mean:yMean,'C.V. %':cv,PRESS:press,'R-Squared':saturated?null:r2,'Adj R-Squared':adjR2,'Pred R-Squared':predR2,'Adeq. Precision':adeqPrec,msError,dfError,tCritical:t_critical,saturated},matrixInfo:{XtX_inv,termHeaders},outlierRunIds}}
         const predictFromModel=(model,codedSettings)=>{if(!model||!model.coeffs)return NaN;let y=model.coeffs['Intercept']?.value??0;for(const[term,coeff]of Object.entries(model.coeffs)){if(term==='Intercept')continue;const factorsInTerm=term.split('*').map(t=>t.trim());if(factorsInTerm.length===1){y+=coeff.value*(codedSettings[factorsInTerm[0]]??0)}else if(factorsInTerm.length===2){if(factorsInTerm[0]===factorsInTerm[1]){y+=coeff.value*(codedSettings[factorsInTerm[0]]??0)**2}else{y+=coeff.value*(codedSettings[factorsInTerm[0]]??0)*(codedSettings[factorsInTerm[1]]??0)}}}return isNaN(y)?-Infinity:y}
         function getPredictionInterval(model,codedSettings){const x0=[];model.matrixInfo.termHeaders.forEach(term=>{if(term==='Intercept'){x0.push(1)}else{const f=term.split('*').map(t=>t.trim());if(f.length===1){x0.push(codedSettings[f[0]]??0)}else if(f.length===2){if(f[0]===f[1]){x0.push((codedSettings[f[0]]??0)**2)}else{x0.push((codedSettings[f[0]]??0)*(codedSettings[f[1]]??0))}}}});const leverage=matrix.dot(matrix.multiply([x0],model.matrixInfo.XtX_inv)[0],x0);const se_pred=Math.sqrt(model.stats.msError*(1+leverage));const margin=(model.stats.tCritical??1.96)*se_pred;const prediction=predictFromModel(model,codedSettings);return{lower:prediction-margin,upper:prediction+margin}}
         function findGlobalOptimum(model, varyingFactors) {if(!model)return null;const predictCoded=cs=>predictFromModel(model,cs);const codedBounds={};varyingFactors.forEach(f=>{codedBounds[f.name]={min:-1,max:1}});let bestCoded=findOptimumRandomWalk(predictCoded,codedBounds,varyingFactors);let bestRealSettings={};varyingFactors.forEach(f=>{if(bestCoded.settings[f.name]!==undefined)bestRealSettings[f.name]=uncodeValue(bestCoded.settings[f.name],f.min,f.max)});let bestZ=Math.max(0,bestCoded.z);return{optimum:{z:bestZ,settings:bestRealSettings}}}
