@@ -79,14 +79,16 @@
                                     <option value="rotatable">Rotatable (alpha calculated)</option>
                                 </select>
                             </div>
-                            <div id="ff-note-container" class="hidden">
-                                <p class="text-xs text-slate-500">Generates a Resolution III or IV design based on the number of factors to screen for main effects efficiently.</p>
+                            <div id="ff-fraction-container" class="hidden">
+                                <label for="ff-fraction" class="block text-sm font-medium text-slate-700 mb-1">Fraction (runs / resolution)</label>
+                                <select id="ff-fraction" class="bg-slate-50 border-slate-300 text-slate-900 text-sm rounded-lg p-2.5 w-full"></select>
                             </div>
                          </div>
                         <button id="generate-plan-btn" class="w-full md:w-auto bg-indigo-600 text-white py-2.5 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 flex items-center justify-center">
                             Generate Plan & Proceed
                         </button>
                     </div>
+                    <p id="ff-fraction-note" class="text-xs text-slate-500 mt-3 hidden"></p>
                 </div>
             </div>
 
@@ -100,6 +102,7 @@
                 </div>
 
                 <div class="card overflow-x-auto">
+                    <p id="design-info" class="text-xs text-slate-500 mb-3"></p>
                     <div id="outlier-warning-container"></div>
                     <div class="flex justify-between items-center mb-4">
                         <h2 class="text-2xl font-semibold text-slate-700">Experiment Data</h2>
@@ -160,7 +163,10 @@
         const generatePlanBtn = document.getElementById('generate-plan-btn');
         const designTypeEl = document.getElementById('design-type');
         const ccdTypeContainer = document.getElementById('ccd-type-container');
-        const ffNoteContainer = document.getElementById('ff-note-container');
+        const ffFractionContainer = document.getElementById('ff-fraction-container');
+        const ffFractionEl = document.getElementById('ff-fraction');
+        const ffFractionNote = document.getElementById('ff-fraction-note');
+        const designInfoEl = document.getElementById('design-info');
         const ccdTypeEl = document.getElementById('ccd-type');
         const numResponsesEl = document.getElementById('num-responses');
         const responseInputsContainer = document.getElementById('response-inputs');
@@ -190,6 +196,8 @@
         // --- Global State ---
         let experimentData = [], definedFactors = [], responses = [];
         let currentDesignType = '';
+        let currentDesignLabel = '';
+        let currentDesignInfo = '';
         const MAX_RESPONSES = 3;
 
         // --- Initial Setup ---
@@ -229,6 +237,7 @@
 
         // --- Event Listeners ---
         designTypeEl.addEventListener('change', handleDesignTypeChange);
+        factorInputsContainer.addEventListener('input', () => { if (designTypeEl.value === 'fractional-factorial') populateFractionOptions(); });
         generatePlanBtn.addEventListener('click', generateAndInitialize);
         fillTestDataBtn.addEventListener('click', fillWithTestData);
         numResponsesEl.addEventListener('input', setupResponseInputs);
@@ -236,13 +245,125 @@
         alertClose.addEventListener('click', () => alertModal.style.display = 'none');
         savePdfBtn.addEventListener('click', saveAsPDF);
         rwPrecisionEl.addEventListener('change', analyzeData);
+        ffFractionEl.addEventListener('change', updateFractionNote);
         optimalitySlidersContainer.addEventListener('input', handleSliderChange);
 
         // --- UI Functions ---
         function handleDesignTypeChange() {
             const selected = designTypeEl.value;
             ccdTypeContainer.classList.toggle('hidden', selected !== 'central-composite');
-            ffNoteContainer.classList.toggle('hidden', selected !== 'fractional-factorial');
+            const isFF = selected === 'fractional-factorial';
+            ffFractionContainer.classList.toggle('hidden', !isFF);
+            ffFractionNote.classList.toggle('hidden', !isFF);
+            if (isFF) populateFractionOptions();
+        }
+
+        // --- Fractional factorial catalogue -------------------------------------------------
+        // Minimum-aberration generators (Montgomery, Design & Analysis of Experiments).
+        // Each generator lists the indices of the base factors whose product defines the
+        // added factor, e.g. [0,1,2] for the base factors A,B,C means the new factor = ABC.
+        const FF_DESIGNS = {
+            3: [{ p: 1, gens: [[0, 1]] }],
+            4: [{ p: 1, gens: [[0, 1, 2]] }],
+            5: [{ p: 1, gens: [[0, 1, 2, 3]] }, { p: 2, gens: [[0, 1], [0, 2]] }],
+            6: [{ p: 1, gens: [[0, 1, 2, 3, 4]] }, { p: 2, gens: [[0, 1, 2], [1, 2, 3]] }, { p: 3, gens: [[0, 1], [0, 2], [1, 2]] }],
+            7: [{ p: 1, gens: [[0, 1, 2, 3, 4, 5]] }, { p: 2, gens: [[0, 1, 2, 3], [0, 1, 3, 4]] }, { p: 3, gens: [[0, 1, 2], [1, 2, 3], [0, 2, 3]] }, { p: 4, gens: [[0, 1], [0, 2], [1, 2], [0, 1, 2]] }],
+            8: [{ p: 2, gens: [[0, 1, 2, 3], [0, 1, 4, 5]] }, { p: 3, gens: [[0, 1, 2], [0, 1, 3], [1, 2, 3, 4]] }, { p: 4, gens: [[1, 2, 3], [0, 2, 3], [0, 1, 2], [0, 1, 3]] }],
+            9: [{ p: 4, gens: [[1, 2, 3, 4], [0, 2, 3, 4], [0, 1, 3, 4], [0, 1, 2, 4]] }, { p: 5, gens: [[0, 1, 2], [1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2, 3]] }]
+        };
+        const FF_LETTERS = 'ABCDEFGHJ';
+        const ROMAN = ['', 'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX'];
+        const popCount = x => { let c = 0; while (x) { c += x & 1; x >>= 1; } return c; };
+
+        // Defining relation: every product of the p generator words, as bitmasks over the k factors.
+        function ffDefiningWords(k, p, gens) {
+            const base = k - p, genWords = [];
+            for (let i = 0; i < p; i++) {
+                let m = 1 << (base + i);
+                gens[i].forEach(b => m |= 1 << b);
+                genWords.push(m);
+            }
+            const all = [];
+            for (let subset = 1; subset < (1 << p); subset++) {
+                let w = 0;
+                for (let i = 0; i < p; i++) if (subset & (1 << i)) w ^= genWords[i];
+                all.push(w);
+            }
+            return all;
+        }
+        const ffResolution = (k, p, gens) => Math.min(...ffDefiningWords(k, p, gens).map(popCount));
+        const ffWordString = (m, k) => [...FF_LETTERS.slice(0, k)].filter((_, i) => (m >> i) & 1).join('');
+
+        function ffDescribe(k, design, factorNames) {
+            const p = design.p;
+            const words = ffDefiningWords(k, p, design.gens).map(m => ffWordString(m, k)).sort((a, b) => a.length - b.length || a.localeCompare(b));
+            const res = ffResolution(k, p, design.gens);
+            const base = k - p;
+            const gensTxt = design.gens.map((g, i) => `${FF_LETTERS[base + i]} = ${g.map(b => FF_LETTERS[b]).join('')}`).join(', ');
+            const meaning = res >= 5
+                ? 'Main effects and two-factor interactions are all clear of each other.'
+                : (res === 4
+                    ? 'Main effects are clear of two-factor interactions, but two-factor interactions are aliased with each other.'
+                    : 'Main effects are aliased with two-factor interactions. Use for screening only, assuming interactions are negligible.');
+            const shown = words.slice(0, 8).join(' = ');
+            const key = factorNames ? factorNames.map((nm, i) => `${FF_LETTERS[i]}=${nm}`).join(', ') : '';
+            return {
+                res,
+                label: `2^(${k}-${p}), ${2 ** base} runs, Resolution ${ROMAN[res]}`,
+                text: `Generators: ${gensTxt}. Defining relation: I = ${shown}${words.length > 8 ? ' = ...' : ''}. ${meaning}`,
+                key
+            };
+        }
+
+        function populateFractionOptions() {
+            const k = countVaryingFactors();
+            const list = FF_DESIGNS[k];
+            ffFractionEl.innerHTML = '';
+            if (!list) {
+                ffFractionEl.disabled = true;
+                const opt = document.createElement('option');
+                opt.textContent = 'n/a';
+                ffFractionEl.appendChild(opt);
+                ffFractionNote.textContent = k < 3
+                    ? 'Define at least 3 varying factors (Min \u2260 Max) to build a fractional factorial.'
+                    : `No tabulated fractional design for ${k} factors (supported: 3 to 9).`;
+                return;
+            }
+            ffFractionEl.disabled = false;
+            list.forEach(d => {
+                const res = ffResolution(k, d.p, d.gens);
+                const opt = document.createElement('option');
+                opt.value = d.p;
+                opt.textContent = `2^(${k}-${d.p})  \u2013  ${2 ** (k - d.p)} runs, Res ${ROMAN[res]}`;
+                ffFractionEl.appendChild(opt);
+            });
+            // Default: the most economical design that still keeps main effects clear of
+            // two-factor interactions (Res IV+); otherwise the cheapest available.
+            const resolved = list.map(d => ({ d, res: ffResolution(k, d.p, d.gens) }));
+            const clear = resolved.filter(x => x.res >= 4);
+            const pick = (clear.length ? clear : resolved).reduce((a, b) => (b.d.p > a.d.p ? b : a));
+            ffFractionEl.value = pick.d.p;
+            updateFractionNote();
+        }
+
+        function updateFractionNote() {
+            const k = countVaryingFactors();
+            const list = FF_DESIGNS[k];
+            if (!list) return;
+            const design = list.find(d => d.p === parseInt(ffFractionEl.value));
+            if (!design) return;
+            ffFractionNote.textContent = ffDescribe(k, design).text;
+        }
+
+        function countVaryingFactors() {
+            let count = 0;
+            document.querySelectorAll('#factor-inputs .data-row').forEach(row => {
+                const name = row.querySelector('[data-prop="name"]').value.trim();
+                const min = parseFloat(row.querySelector('[data-prop="min"]').value);
+                const max = parseFloat(row.querySelector('[data-prop="max"]').value);
+                if (name && !isNaN(min) && !isNaN(max) && min !== max) count++;
+            });
+            return count;
         }
 
         function customAlert(message) {
@@ -305,6 +426,19 @@
             responses = getResponsesFromUI();
             if (responses.length === 0) { customAlert("Please define at least one response name."); return; }
 
+            currentDesignLabel = designTypeEl.options[designTypeEl.selectedIndex].text;
+            currentDesignInfo = '';
+            if (currentDesignType === 'central-composite') {
+                currentDesignLabel += ` (${ccdTypeEl.options[ccdTypeEl.selectedIndex].text})`;
+                const k = definedFactors.length;
+                if (ccdTypeEl.value === 'rotatable') {
+                    const alpha = Math.pow(2, k / 4);
+                    currentDesignInfo = `Rotatable CCD, alpha = ${alpha.toFixed(3)}. Axial points lie outside the Min/Max cube; those Min/Max values are the factorial levels, not the extremes of the design.`;
+                    const negative = definedFactors.filter(f => uncodeValue(-alpha, f.min, f.max) < 0).map(f => f.name);
+                    if (negative.length) customAlert(`Warning: with alpha = ${alpha.toFixed(3)} the low axial point is negative for: ${negative.join(', ')}. Either narrow the ranges or use a face-centered design.`);
+                }
+            }
+
             let experimentPlan;
             switch(currentDesignType) {
                 case 'factorial': experimentPlan = generateFactorial(definedFactors); break;
@@ -324,6 +458,7 @@
             
             designSection.classList.add('hidden');
             resultsSection.classList.remove('hidden');
+            designInfoEl.textContent = currentDesignInfo ? `${currentDesignLabel}. ${currentDesignInfo}` : currentDesignLabel;
             renderAnalysisUI();
             renderTable();
             analyzeData();
@@ -332,50 +467,42 @@
         // --- Design Generation Functions ---
         function generateFactorial(factors){const k=factors.length,numRuns=2**k,plan=[];for(let i=0;i<numRuns;i++){const settings={};for(let j=0;j<k;j++)settings[factors[j].name]=((i>>j)&1)===0?factors[j].min:factors[j].max;plan.push(settings)}return plan}
         function generateBoxBehnken(factors){const k=factors.length;if(k<3)return null;const plan=[],centerPoint={};factors.forEach(f=>centerPoint[f.name]=(f.min+f.max)/2);for(let i=0;i<k;i++)for(let j=i+1;j<k;j++)[-1,1].forEach(li=>[-1,1].forEach(lj=>{const settings={...centerPoint};settings[factors[i].name]=li===-1?factors[i].min:factors[i].max;settings[factors[j].name]=lj===-1?factors[j].min:factors[j].max;plan.push(settings)}));for(let i=0;i<Math.max(3,Math.floor(k/2)+1);i++)plan.push(centerPoint);return plan}
-        function generateCentralComposite(factors){let plan=generateFactorial(factors);const k=factors.length;const centerPoint={};factors.forEach(f=>centerPoint[f.name]=(f.min+f.max)/2);for(let i=0;i<Math.max(3,k);i++)plan.push(centerPoint);const alpha=ccdTypeEl.value==='rotatable'?k**0.25:1;factors.forEach(f=>{plan.push({...centerPoint,[f.name]:uncodeValue(-alpha,f.min,f.max)});plan.push({...centerPoint,[f.name]:uncodeValue(alpha,f.min,f.max)})});return plan}
+        function generateCentralComposite(factors){let plan=generateFactorial(factors);const k=factors.length;const centerPoint={};factors.forEach(f=>centerPoint[f.name]=(f.min+f.max)/2);for(let i=0;i<Math.max(3,k);i++)plan.push(centerPoint);const alpha=ccdTypeEl.value==='rotatable'?Math.pow(2,k/4):1;factors.forEach(f=>{plan.push({...centerPoint,[f.name]:uncodeValue(-alpha,f.min,f.max)});plan.push({...centerPoint,[f.name]:uncodeValue(alpha,f.min,f.max)})});return plan}
         
         function generateFractionalFactorial(factors) {
             const k = factors.length;
-            let base_k, numRuns;
-            if (k <= 4) { base_k = 3; numRuns = 8; } 
-            else if (k <= 7) { base_k = 4; numRuns = 16; } 
-            else { customAlert("Fractional Factorial designs for more than 7 factors are not implemented in this version."); return null; }
-            
+            const list = FF_DESIGNS[k];
+            if (!list) { customAlert(`No tabulated fractional factorial design for ${k} factors. Supported range is 3 to 9 factors.`); return null; }
+            const design = list.find(d => d.p === parseInt(ffFractionEl.value)) || list[list.length - 1];
+            const p = design.p, base_k = k - p, numRuns = 2 ** base_k;
+
+            // Base full factorial on the first (k - p) factors.
             const baseDesign = [];
-            for (let i = 0; i < 2**base_k; i++) {
+            for (let i = 0; i < numRuns; i++) {
                 const run = [];
-                for (let j = 0; j < base_k; j++) { run.push(((i >> j) & 1) === 0 ? -1 : 1); }
+                for (let j = 0; j < base_k; j++) run.push(((i >> j) & 1) === 0 ? -1 : 1);
                 baseDesign.push(run);
             }
-
-            const generators = {
-                4: [[0, 1]], // D = AB
-                5: [[0, 1], [0, 2]], // D = AB, E = AC
-                6: [[0, 1], [0, 2], [1, 2]], // D = AB, E = AC, F = BC
-                7: [[0, 1], [0, 2], [1, 2], [0, 1, 2]] // D=AB, E=AC, F=BC, G=ABC
-            };
-            
+            // Added factors are the products defined by the generators.
             const fullDesign = baseDesign.map(run => {
                 const newRun = [...run];
-                if (k > base_k) {
-                    const gens = generators[k];
-                    for(let i = 0; i < k - base_k; i++) {
-                        let product = 1;
-                        gens[i].forEach(idx => product *= run[idx]);
-                        newRun.push(product);
-                    }
-                }
+                design.gens.forEach(gen => {
+                    let product = 1;
+                    gen.forEach(idx => product *= run[idx]);
+                    newRun.push(product);
+                });
                 return newRun;
             });
 
-            const plan = fullDesign.map(codedRun => {
+            const info = ffDescribe(k, design, factors.map(f => f.name));
+            currentDesignLabel = info.label;
+            currentDesignInfo = `${info.text} Factor key: ${info.key}.`;
+
+            return fullDesign.map(codedRun => {
                 const settings = {};
-                factors.forEach((f, i) => {
-                    settings[f.name] = codedRun[i] === -1 ? f.min : f.max;
-                });
+                factors.forEach((f, i) => { settings[f.name] = codedRun[i] === -1 ? f.min : f.max; });
                 return settings;
             });
-            return plan;
         }
 
         function generateTaguchiL8(factors) {
@@ -482,7 +609,7 @@
                 row.className = 'bg-white border-b hover:bg-slate-50';
                 row.dataset.index = index;
                 row.dataset.expId = exp.id;
-                const settingsHtml = definedFactors.map(f => `<td class="px-6 py-4 font-value"><input type="number" data-metric="setting" data-factor="${f.name}" value="${exp.settings[f.name].toFixed(3)}" class="w-24 bg-slate-50 border-slate-300 text-slate-900 text-sm rounded-lg p-2 text-center" min="0" step="any"></td>`).join('');
+                const settingsHtml = definedFactors.map(f => `<td class="px-6 py-4 font-value"><input type="number" data-metric="setting" data-factor="${f.name}" value="${exp.settings[f.name].toFixed(3)}" class="w-24 bg-slate-50 border-slate-300 text-slate-900 text-sm rounded-lg p-2 text-center" step="any"></td>`).join('');
                 const responsesHtml = responses.map(r => `<td class="px-6 py-4"><input type="number" data-metric="${r.id}" class="w-24 bg-slate-50 border-slate-300 text-slate-900 text-sm rounded-lg p-2" min="0" step="any"></td>`).join('');
                 row.innerHTML = `<th scope="row" class="px-6 py-4 font-medium text-slate-900 whitespace-nowrap">${exp.id}</th>${settingsHtml}${responsesHtml}<td class="px-6 py-4 font-medium text-slate-600 score-cell">-</td>`;
                 tableBody.appendChild(row)
@@ -494,7 +621,9 @@
                 const rowIndex = e.target.closest('tr').dataset.index;
                 const metric = e.target.dataset.metric;
                 let value = e.target.value === '' || e.target.value === null ? null : parseFloat(e.target.value);
-                if (value < 0) { value = 0; e.target.value = 0; }
+                // Factor settings may legitimately be negative (axial points of a rotatable CCD),
+                // so only responses are clamped at zero.
+                if (metric !== 'setting' && value < 0) { value = 0; e.target.value = 0; }
                 if (rowIndex < experimentData.length) {
                     if (metric === 'setting') {
                         experimentData[rowIndex].settings[e.target.dataset.factor] = value;
@@ -731,7 +860,7 @@
                             <tbody>${Object.entries(model.coeffs).map(([term, stats])=>`<tr><td class="border-t px-2 py-1">${term.replace(/\*/g, ' * ')}</td><td class="border-t px-2 py-1 text-right font-value">${stats.value.toFixed(4)}</td><td class="border-t px-2 py-1 text-right font-value">${stats.stdError.toFixed(4)}</td><td class="border-t px-2 py-1 text-right font-value">${stats.ciLower.toFixed(4)}</td><td class="border-t px-2 py-1 text-right font-value">${stats.ciUpper.toFixed(4)}</td></tr>`).join('')}</tbody>
                         </table>
                     </div>
-                    <p class="text-xs text-slate-500 mt-2">* Confidence intervals are approximated using a t-value of 1.96.</p>
+                    <p class="text-xs text-slate-500 mt-2">* 95% confidence intervals use t = ${model.stats.tCritical.toFixed(3)} with ${model.stats.dfError} residual degrees of freedom.</p>
                 </div>
                 <div class="border-t pt-4 mt-4">
                     <table class="w-full text-sm fit-statistics-table">
@@ -854,13 +983,21 @@
             }
         }
 
-        const matrix={multiply:(a,b)=>{if(!a||!b||a.length===0||b.length===0||a[0].length!==b.length)return null;return a.map((r,i)=>b[0].map((_,j)=>r.reduce((s,e,k)=>s+(e*b[k][j]),0)))},transpose:a=>a[0].map((_,i)=>a.map(r=>r[i])),invert:m=>{const n=m.length,id=m.map((_,i)=>m.map((_,j)=>i===j?1:0)),C=m.map((r,i)=>[...r,...id[i]]);for(let i=0;i<n;i++){let p=i;while(p<n&&C[p][i]===0)p++;if(p===n)return null;[C[i],C[p]]=[C[p],C[i]];let d=C[i][i];for(let j=i;j<2*n;j++)C[i][j]/=d;for(let k=0;k<n;k++)if(k!==i){let mu=C[k][i];for(let j=i;j<2*n;j++)C[k][j]-=mu*C[i][j]}}return C.map(r=>r.slice(n))},dot:(v1,v2)=>v1.reduce((s,x,i)=>s+x*v2[i],0),norm:v=>Math.sqrt(v.reduce((s,x)=>s+x*x,0))};
+        const matrix={multiply:(a,b)=>{if(!a||!b||a.length===0||b.length===0||a[0].length!==b.length)return null;return a.map((r,i)=>b[0].map((_,j)=>r.reduce((s,e,k)=>s+(e*b[k][j]),0)))},transpose:a=>a[0].map((_,i)=>a.map(r=>r[i])),invert:m=>{const n=m.length,id=m.map((_,i)=>m.map((_,j)=>i===j?1:0)),C=m.map((r,i)=>[...r,...id[i]]);let scale=0;m.forEach(r=>r.forEach(v=>{if(Math.abs(v)>scale)scale=Math.abs(v)}));const tol=1e-11*Math.max(1,scale);for(let i=0;i<n;i++){let p=i,best=Math.abs(C[i][i]);for(let r=i+1;r<n;r++){const v=Math.abs(C[r][i]);if(v>best){best=v;p=r}}if(best<tol)return null;[C[i],C[p]]=[C[p],C[i]];const d=C[i][i];for(let j=i;j<2*n;j++)C[i][j]/=d;for(let k=0;k<n;k++)if(k!==i){const mu=C[k][i];if(mu!==0)for(let j=i;j<2*n;j++)C[k][j]-=mu*C[i][j]}}return C.map(r=>r.slice(n))},dot:(v1,v2)=>v1.reduce((s,x,i)=>s+x*v2[i],0),norm:v=>Math.sqrt(v.reduce((s,x)=>s+x*x,0))};
+        // --- Student t distribution (Lanczos log-gamma + Numerical Recipes incomplete beta) ---
+        function logGamma(x){const g=[76.18009172947146,-86.50532032941677,24.01409824083091,-1.231739572450155,0.1208650973866179e-2,-0.5395239384953e-5];let y=x,tmp=x+5.5;tmp-=(x+0.5)*Math.log(tmp);let ser=1.000000000190015;for(let j=0;j<6;j++)ser+=g[j]/++y;return -tmp+Math.log(2.5066282746310005*ser/x)}
+        function betacf(a,b,x){const MAXIT=200,EPS=3e-14,FPMIN=1e-300,qab=a+b,qap=a+1,qam=a-1;let c=1,d=1-qab*x/qap;if(Math.abs(d)<FPMIN)d=FPMIN;d=1/d;let h=d;for(let m=1;m<=MAXIT;m++){const m2=2*m;let aa=m*(b-m)*x/((qam+m2)*(a+m2));d=1+aa*d;if(Math.abs(d)<FPMIN)d=FPMIN;c=1+aa/c;if(Math.abs(c)<FPMIN)c=FPMIN;d=1/d;h*=d*c;aa=-(a+m)*(qab+m)*x/((a+m2)*(qap+m2));d=1+aa*d;if(Math.abs(d)<FPMIN)d=FPMIN;c=1+aa/c;if(Math.abs(c)<FPMIN)c=FPMIN;d=1/d;const del=d*c;h*=del;if(Math.abs(del-1)<EPS)break}return h}
+        function betai(a,b,x){if(x<=0)return 0;if(x>=1)return 1;const bt=Math.exp(logGamma(a+b)-logGamma(a)-logGamma(b)+a*Math.log(x)+b*Math.log(1-x));return(x<(a+1)/(a+b+2))?bt*betacf(a,b,x)/a:1-bt*betacf(b,a,1-x)/b}
+        function tCDF(t,v){const x=v/(v+t*t),tail=0.5*betai(v/2,0.5,x);return t>=0?1-tail:tail}
+        const T_CACHE={};
+        function tInv(p,v){if(!(v>0)||!isFinite(v))return 1.959963985;const key=p+'|'+v;if(T_CACHE[key]!==undefined)return T_CACHE[key];let lo=0,hi=1e4;for(let i=0;i<200;i++){const mid=0.5*(lo+hi);if(tCDF(mid,v)<p)lo=mid;else hi=mid}const r=0.5*(lo+hi);T_CACHE[key]=r;return r}
+
         const codeValue=(realValue,min,max)=>(max===min)?0:(2*(realValue-min)/(max-min)-1);
         const uncodeValue=(codedValue,min,max)=>min+(codedValue+1)*(max-min)/2;
 
-        function buildModel(dataPoints,factors,responseId,designType){const validData=dataPoints.filter(d=>d[responseId]!==null&&isFinite(d[responseId])&&factors.every(f=>d.settings[f.name]!==undefined));const k=factors.length;let termHeaders=['Intercept'];factors.forEach(f=>termHeaders.push(f.name));const isScreening=['taguchi','fractional-factorial'].includes(designType);if(!isScreening){if(designType!=='factorial'){for(let i=0;i<k;i++){termHeaders.push(`${factors[i].name}*${factors[i].name}`);for(let j=i+1;j<k;j++){termHeaders.push(`${factors[i].name}*${factors[j].name}`)}}}else{for(let i=0;i<k;i++)for(let j=i+1;j<k;j++)termHeaders.push(`${factors[i].name}*${factors[j].name}`)}}if(validData.length<termHeaders.length)return null;const X=validData.map(p=>{const codedSettings={};factors.forEach(f=>codedSettings[f.name]=codeValue(p.settings[f.name],f.min,f.max));const row=[1];factors.forEach(f=>row.push(codedSettings[f.name]));if(!isScreening){if(designType!=='factorial'){for(let i=0;i<k;i++){row.push(codedSettings[factors[i].name]**2);for(let j=i+1;j<k;j++){row.push(codedSettings[factors[i].name]*codedSettings[factors[j].name])}}}else{for(let i=0;i<k;i++)for(let j=i+1;j<k;j++)row.push(codedSettings[factors[i].name]*codedSettings[factors[j].name])}}return row});let yObserved=validData.map(p=>p[responseId]);const Xt=matrix.transpose(X),XtX=matrix.multiply(Xt,X),XtX_inv=matrix.invert(XtX);if(!XtX_inv){customAlert(`Multicollinearity Detected for response "${responses.find(r=>r.id===responseId)?.name || responseId}": The experimental design is ill-conditioned and a model cannot be built. This often happens when factor values are not varied independently. Please check the factor settings in the table.`);return null}const b=matrix.multiply(XtX_inv,matrix.multiply(Xt,yObserved.map(v=>[v]))).map(c=>c[0]);const yPredicted=matrix.multiply(X,b.map(c=>[c])).map(v=>v[0]);const yMean=yObserved.reduce((a,b)=>a+b,0)/yObserved.length;const residuals=yObserved.map((y,i)=>y-yPredicted[i]);const ssError=residuals.reduce((sum,r)=>sum+r*r,0);const ssTotal=yObserved.reduce((sum,y)=>sum+(y-yMean)**2,0);const n=validData.length,p_terms=b.length;if(n-p_terms<=0)return null;const msError=ssError/(n-p_terms);const hatDiag=X.map(x_i=>matrix.dot(matrix.multiply([x_i],XtX_inv)[0],x_i));const press=residuals.reduce((sum,r,i)=>(1-hatDiag[i]>1e-9)?sum+Math.pow(r/(1-hatDiag[i]),2):sum,0);const predR2=ssTotal>0?1-(press/ssTotal):1;const stdDev=Math.sqrt(msError);const studentizedResiduals=residuals.map((r,i)=>(stdDev>1e-9&&(1-hatDiag[i])>1e-9)?r/(stdDev*Math.sqrt(1-hatDiag[i])):0);const outlierRunIds=validData.filter((_,i)=>Math.abs(studentizedResiduals[i])>3.5).map(p=>p.id);const cv=yMean!==0?Math.abs((stdDev/yMean)*100):0;const yPredRange=Math.max(...yPredicted)-Math.min(...yPredicted);const adeqPrec=msError>0?yPredRange/Math.sqrt(p_terms*msError/n):Infinity;const r2=ssTotal>0?1-(ssError/ssTotal):1;const adjR2=n-p_terms-1>0?1-((1-r2)*(n-1))/(n-p_terms-1):r2;const t_critical=1.96;const coeffsWithStats={};termHeaders.forEach((key,i)=>{const c_ii=XtX_inv[i][i];const stdError=Math.sqrt(msError*c_ii);const marginOfError=t_critical*stdError;coeffsWithStats[key]={value:b[i],stdError,ciLower:b[i]-marginOfError,ciUpper:b[i]+marginOfError}});return{coeffs:coeffsWithStats,stats:{'Std. Dev.':stdDev,Mean:yMean,'C.V. %':cv,PRESS:press,'R-Squared':r2,'Adj R-Squared':adjR2,'Pred R-Squared':predR2,'Adeq. Precision':adeqPrec,msError},matrixInfo:{XtX_inv,termHeaders},outlierRunIds}}
+        function buildModel(dataPoints,factors,responseId,designType){const validData=dataPoints.filter(d=>d[responseId]!==null&&isFinite(d[responseId])&&factors.every(f=>d.settings[f.name]!==undefined));const k=factors.length;let termHeaders=['Intercept'];factors.forEach(f=>termHeaders.push(f.name));const isScreening=['taguchi','fractional-factorial'].includes(designType);if(!isScreening){if(designType!=='factorial'){for(let i=0;i<k;i++){termHeaders.push(`${factors[i].name}*${factors[i].name}`);for(let j=i+1;j<k;j++){termHeaders.push(`${factors[i].name}*${factors[j].name}`)}}}else{for(let i=0;i<k;i++)for(let j=i+1;j<k;j++)termHeaders.push(`${factors[i].name}*${factors[j].name}`)}}if(validData.length<termHeaders.length)return null;const X=validData.map(p=>{const codedSettings={};factors.forEach(f=>codedSettings[f.name]=codeValue(p.settings[f.name],f.min,f.max));const row=[1];factors.forEach(f=>row.push(codedSettings[f.name]));if(!isScreening){if(designType!=='factorial'){for(let i=0;i<k;i++){row.push(codedSettings[factors[i].name]**2);for(let j=i+1;j<k;j++){row.push(codedSettings[factors[i].name]*codedSettings[factors[j].name])}}}else{for(let i=0;i<k;i++)for(let j=i+1;j<k;j++)row.push(codedSettings[factors[i].name]*codedSettings[factors[j].name])}}return row});let yObserved=validData.map(p=>p[responseId]);const Xt=matrix.transpose(X),XtX=matrix.multiply(Xt,X),XtX_inv=matrix.invert(XtX);if(!XtX_inv){customAlert(`Multicollinearity Detected for response "${responses.find(r=>r.id===responseId)?.name || responseId}": The experimental design is ill-conditioned and a model cannot be built. This often happens when factor values are not varied independently. Please check the factor settings in the table.`);return null}const b=matrix.multiply(XtX_inv,matrix.multiply(Xt,yObserved.map(v=>[v]))).map(c=>c[0]);const yPredicted=matrix.multiply(X,b.map(c=>[c])).map(v=>v[0]);const yMean=yObserved.reduce((a,b)=>a+b,0)/yObserved.length;const residuals=yObserved.map((y,i)=>y-yPredicted[i]);const ssError=residuals.reduce((sum,r)=>sum+r*r,0);const ssTotal=yObserved.reduce((sum,y)=>sum+(y-yMean)**2,0);const n=validData.length,p_terms=b.length;if(n-p_terms<=0)return null;const msError=ssError/(n-p_terms);const hatDiag=X.map(x_i=>matrix.dot(matrix.multiply([x_i],XtX_inv)[0],x_i));const press=residuals.reduce((sum,r,i)=>(1-hatDiag[i]>1e-9)?sum+Math.pow(r/(1-hatDiag[i]),2):sum,0);const predR2=ssTotal>0?1-(press/ssTotal):1;const stdDev=Math.sqrt(msError);const dfError=n-p_terms;const dfOut=dfError-1;const outlierCutoff=dfOut>0?Math.max(3,tInv(1-0.025/n,dfOut)):Infinity;const rStudent=residuals.map((r,i)=>{const h=hatDiag[i];if(dfOut<=0||1-h<=1e-9)return 0;const s2i=((dfError*msError)-(r*r/(1-h)))/dfOut;return s2i>1e-12?r/Math.sqrt(s2i*(1-h)):0});const outlierRunIds=validData.filter((_,i)=>Math.abs(rStudent[i])>outlierCutoff).map(p=>p.id);const cv=yMean!==0?Math.abs((stdDev/yMean)*100):0;const yPredRange=Math.max(...yPredicted)-Math.min(...yPredicted);const adeqPrec=msError>0?yPredRange/Math.sqrt(p_terms*msError/n):Infinity;const r2=ssTotal>0?1-(ssError/ssTotal):1;const adjR2=n-p_terms>0?1-((1-r2)*(n-1))/(n-p_terms):r2;const t_critical=tInv(0.975,dfError);const coeffsWithStats={};termHeaders.forEach((key,i)=>{const c_ii=XtX_inv[i][i];const stdError=Math.sqrt(msError*c_ii);const marginOfError=t_critical*stdError;coeffsWithStats[key]={value:b[i],stdError,ciLower:b[i]-marginOfError,ciUpper:b[i]+marginOfError}});return{coeffs:coeffsWithStats,stats:{'Std. Dev.':stdDev,Mean:yMean,'C.V. %':cv,PRESS:press,'R-Squared':r2,'Adj R-Squared':adjR2,'Pred R-Squared':predR2,'Adeq. Precision':adeqPrec,msError,dfError,tCritical:t_critical},matrixInfo:{XtX_inv,termHeaders},outlierRunIds}}
         const predictFromModel=(model,codedSettings)=>{if(!model||!model.coeffs)return NaN;let y=model.coeffs['Intercept']?.value??0;for(const[term,coeff]of Object.entries(model.coeffs)){if(term==='Intercept')continue;const factorsInTerm=term.split('*').map(t=>t.trim());if(factorsInTerm.length===1){y+=coeff.value*(codedSettings[factorsInTerm[0]]??0)}else if(factorsInTerm.length===2){if(factorsInTerm[0]===factorsInTerm[1]){y+=coeff.value*(codedSettings[factorsInTerm[0]]??0)**2}else{y+=coeff.value*(codedSettings[factorsInTerm[0]]??0)*(codedSettings[factorsInTerm[1]]??0)}}}return isNaN(y)?-Infinity:y}
-        function getPredictionInterval(model,codedSettings){const x0=[];model.matrixInfo.termHeaders.forEach(term=>{if(term==='Intercept'){x0.push(1)}else{const f=term.split('*').map(t=>t.trim());if(f.length===1){x0.push(codedSettings[f[0]]??0)}else if(f.length===2){if(f[0]===f[1]){x0.push((codedSettings[f[0]]??0)**2)}else{x0.push((codedSettings[f[0]]??0)*(codedSettings[f[1]]??0))}}}});const leverage=matrix.dot(matrix.multiply([x0],model.matrixInfo.XtX_inv)[0],x0);const se_pred=Math.sqrt(model.stats.msError*(1+leverage));const margin=1.96*se_pred;const prediction=predictFromModel(model,codedSettings);return{lower:prediction-margin,upper:prediction+margin}}
+        function getPredictionInterval(model,codedSettings){const x0=[];model.matrixInfo.termHeaders.forEach(term=>{if(term==='Intercept'){x0.push(1)}else{const f=term.split('*').map(t=>t.trim());if(f.length===1){x0.push(codedSettings[f[0]]??0)}else if(f.length===2){if(f[0]===f[1]){x0.push((codedSettings[f[0]]??0)**2)}else{x0.push((codedSettings[f[0]]??0)*(codedSettings[f[1]]??0))}}}});const leverage=matrix.dot(matrix.multiply([x0],model.matrixInfo.XtX_inv)[0],x0);const se_pred=Math.sqrt(model.stats.msError*(1+leverage));const margin=(model.stats.tCritical??1.96)*se_pred;const prediction=predictFromModel(model,codedSettings);return{lower:prediction-margin,upper:prediction+margin}}
         function findGlobalOptimum(model, varyingFactors) {if(!model)return null;const predictCoded=cs=>predictFromModel(model,cs);const codedBounds={};varyingFactors.forEach(f=>{codedBounds[f.name]={min:-1,max:1}});let bestCoded=findOptimumRandomWalk(predictCoded,codedBounds,varyingFactors);let bestRealSettings={};varyingFactors.forEach(f=>{if(bestCoded.settings[f.name]!==undefined)bestRealSettings[f.name]=uncodeValue(bestCoded.settings[f.name],f.min,f.max)});let bestZ=Math.max(0,bestCoded.z);return{optimum:{z:bestZ,settings:bestRealSettings}}}
         function findOptimumRandomWalk(predict,bounds,varyingFactors){const precision=rwPrecisionEl.value;let initialPoints,maxIterations;switch(precision){case'coarse':initialPoints=200;maxIterations=800;break;case'extensive':initialPoints=2000;maxIterations=98000;break;default:initialPoints=1000;maxIterations=9000;break}let bestSettings={},bestZ=-Infinity;for(let i=0;i<initialPoints;i++){let currentSettings={};varyingFactors.forEach(f=>{currentSettings[f.name]=bounds[f.name].min+Math.random()*(bounds[f.name].max-bounds[f.name].min)});const z=predict(currentSettings);if(z>bestZ){bestZ=z;bestSettings=currentSettings}}for(let i=0;i<maxIterations;i++){let newSettings={};const decay=1-((i/maxIterations)**2);varyingFactors.forEach(f=>{const range=(bounds[f.name].max-bounds[f.name].min)*0.2*decay;newSettings[f.name]=(bestSettings[f.name]??0)+(Math.random()-0.5)*range;newSettings[f.name]=Math.max(bounds[f.name].min,Math.min(bounds[f.name].max,newSettings[f.name]))});const z=predict(newSettings);if(z>bestZ){bestZ=z;bestSettings=newSettings}}return{z:bestZ,settings:bestSettings}}
 
@@ -880,11 +1017,15 @@
                 doc.setFontSize(11); doc.text(`Generated on: ${timestamp}`, 14, yPos); yPos += 10;
                 
                 // --- Design Info ---
-                let designText = `Design Type: ${designTypeEl.options[designTypeEl.selectedIndex].text}`;
-                if (currentDesignType === 'central-composite') {
-                    designText += ` (${ccdTypeEl.options[ccdTypeEl.selectedIndex].text})`;
+                doc.text(`Design Type: ${currentDesignLabel || designTypeEl.options[designTypeEl.selectedIndex].text}`, 14, yPos); yPos += 6;
+                if (currentDesignInfo) {
+                    doc.setFontSize(8).setTextColor(120);
+                    const infoLines = doc.splitTextToSize(currentDesignInfo, 182);
+                    doc.text(infoLines, 14, yPos);
+                    yPos += infoLines.length * 3.6;
+                    doc.setFontSize(11).setTextColor(0);
                 }
-                doc.text(designText, 14, yPos); yPos += 10;
+                yPos += 6;
                 doc.setDrawColor(220, 220, 220); doc.line(14, yPos - 5, 196, yPos - 5);
 
                  // --- Outlier Warning ---
